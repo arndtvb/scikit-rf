@@ -31,7 +31,7 @@ Functions
 
 '''
 
-from pylab import linspace, gca,plot
+from pylab import linspace, gca,plot, autoscale
 from numpy import pi
 import numpy as npy
 from numpy import fft # used to center attribute `t` at 0
@@ -146,8 +146,9 @@ class Frequency(object):
     @classmethod
     def from_f(cls,f, *args,**kwargs):
         '''
-        Alternative constructor of a Frequency object from a frequency
-        vector, the unit of which is set by kwarg 'unit'
+        Construct Frequency object from a frequency vector.
+        
+        The unit of  is set by kwarg 'unit'
 
         Parameters
         -----------
@@ -438,7 +439,7 @@ class Frequency(object):
         return overlap_freq(self, f2)
     
     
-    def plot(self, *args, **kwargs):
+    def plot(self, y, *args, **kwargs):
         '''
         Plot something vs this frequency
         
@@ -446,7 +447,17 @@ class Frequency(object):
         calls `labelXAxis`.
         
         '''
-        plot(self.f_scaled, *args, **kwargs)
+        try:
+            if len(y)==len(self):
+                pass
+            else:
+                raise IndexError(['thing to plot doesnt have same'
+                                 ' number of points as f'])
+        except(TypeError):
+            y = y*npy.ones(len(self))
+            
+        plot(self.f_scaled, y,*args, **kwargs)
+        autoscale(axis='x', tight=True)
         self.labelXAxis()
         
 def overlap_freq(f1,f2):

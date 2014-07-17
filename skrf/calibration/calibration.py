@@ -16,7 +16,7 @@ Base Class
 
    Calibration
 
-One port Calibrations
+One-port Calibrations
 ----------------------
 
 .. autosummary::
@@ -24,7 +24,7 @@ One port Calibrations
    
    OnePort
    
-Two port Calibrations
+Two-port Calibrations
 ---------------------
 
 .. autosummary::
@@ -34,6 +34,14 @@ Two port Calibrations
    EightTerm
    UnknownThru
    TRL
+
+Partial Calibrations 
+++++++++++++++++++++++++
+
+.. autosummary::
+   :toctree: generated/
+
+   EnhancedResponse
 
 '''
 import numpy as npy
@@ -47,7 +55,7 @@ from warnings import warn
 import cPickle as pickle
 
 from ..mathFunctions import complex_2_db, sqrt_phase_unwrap, \
-    find_correct_sign, find_closest,  ALMOST_ZERO, rand_c
+    find_correct_sign, find_closest,  ALMOST_ZERO, rand_c,cross_ratio
 from ..frequency import *
 from ..network import *
 from ..networkSet import func_on_networks as fon
@@ -112,7 +120,7 @@ class Calibration(object):
     This class implements the common mechanisms for all calibration 
     algorithms. Specific calibration algorithms should inheret this  
     class and overide the methods:
-        *  :func:`Calibration.run`
+        *  :func:`Calibration.run` 
         *  :func:`Calibration.apply_cal`
         *  :func:`Calibration.embed` (optional)
     
@@ -282,9 +290,10 @@ class Calibration(object):
         -------------
         std : int or str
             the integer of calibration standard to remove, or the name 
-            of the ideal calibration standard to remove.
+            of the ideal or measured calibration standard to remove.
         
-        
+       
+            
         Returns
         -----------
         ideal,measured : tuple of skrf.Networks
@@ -296,6 +305,11 @@ class Calibration(object):
         if isinstance(std, str):
             for idx,ideal in enumerate(self.ideals):
                 if std  == ideal.name:
+                    std = idx
+        
+        if isinstance(std, str):
+            for idx,measured in enumerate(self.measured):
+                if std  == measured.name:
                     std = idx
         
         if isinstance(std, str):
@@ -568,7 +582,20 @@ class Calibration(object):
         
         '''
         return [ideal - caled for (ideal, caled) in zip(self.ideals, self.caled_ntwks)]
-
+    
+    @property
+    def residual_ntwk_sets(self):
+        '''
+        Returns a NetworkSet for each `residual_ntwk`, grouped by their names
+        '''
+       
+        residual_sets={}
+        std_names = list(set([k.name  for k in self.ideals ]))
+        for std_name in std_names:
+            residual_sets[std_name] = NetworkSet(
+                [k for k in self.residual_ntwks if k.name.startswith(std_name)])
+        return residual_sets
+    
     @property
     def caled_ntwks(self):
         '''
@@ -580,16 +607,136 @@ class Calibration(object):
     @property
     def caled_ntwk_sets(self):
         '''
-        Returns a NetworkSet for each caled_ntwk, based on their names
+        Returns a NetworkSet for each `caled_ntwk`, grouped by their names
         '''
        
         caled_sets={}
-        std_names = list(set([k.name  for k in self.caled_ntwks ]))
+        std_names = list(set([k.name  for k in self.ideals ]))
         for std_name in std_names:
             caled_sets[std_name] = NetworkSet(
-                [k for k in self.caled_ntwks if k.name is std_name])
+                [k for k in self.caled_ntwks if k.name.startswith(std_name)])
         return caled_sets
-       
+    
+    @property
+    def biased_error(self):
+        '''
+        Estimate of biased error for overdetermined calibration with
+        multiple connections of each standard
+
+        Returns
+        ----------
+        biased_error : skrf.Network
+            Network with s_mag is proportional to the biased error 
+
+        Notes
+        -------
+        Mathematically, this is
+            
+            mean_s(|mean_c(r)|)
+            
+        Where:
+        
+        * r: complex residual errors
+        * mean_c: complex mean taken accross connection
+        * mean_s: complex mean taken accross standard
+        
+        See Also
+        ---------
+        biased_error
+        unbiased_error
+        total_error
+        
+        '''
+        rns = self.residual_ntwk_sets
+        out =  NetworkSet([rns[k].mean_s for k in rns]).mean_s_mag
+        out.name = 'Biased Error'
+        return out
+    
+    @property
+    def unbiased_error(self):
+        '''
+        Estimate of unbiased error for overdetermined calibration with
+        multiple connections of each standard
+
+        Returns
+        ----------
+        unbiased_error : skrf.Network
+            Network with s_mag is proportional to the unbiased error 
+
+        Notes
+        -------
+        Mathematically, this is
+        
+            mean_s(std_c(r))
+        
+        where:
+        * r : complex residual errors
+        * std_c : standard deviation taken accross  connections
+        * mean_s : complex mean taken accross  standards
+        
+        See Also
+        ---------
+        biased_error
+        unbiased_error
+        total_error
+        '''
+        rns = self.residual_ntwk_sets
+        out = NetworkSet([rns[k].std_s for k in rns]).mean_s_mag
+        out.name = 'Unbiased Error'
+        return out
+    
+    @property
+    def total_error(self):
+        '''
+        Estimate of total error for overdetermined calibration with
+        multiple connections of each standard.This is the combined
+        effects of both biased and un-biased errors
+
+        Returns
+        ----------
+        total_error : skrf.Network
+            Network with s_mag is proportional to the total error 
+
+        Notes
+        -------
+        Mathematically, this is
+        
+            std_cs(r)
+                
+        where:
+        * r : complex residual errors
+        * std_cs : standard deviation taken accross connections
+                and standards
+        
+        See Also
+        ---------
+        biased_error
+        unbiased_error
+        total_error
+        '''
+        out = NetworkSet(self.residual_ntwks).mean_s_mag
+        out.name = 'Total Error'
+        return out
+    
+    def plot_errors(self, *args, **kwargs):
+        '''
+        Plots biased, unbiased and total error in dB scaled
+        
+        See Also
+        ---------
+        biased_error
+        unbiased_error
+        total_error
+        '''
+        port_list = self.biased_error.port_tuples
+        for m,n in port_list:
+            plb.figure()
+            plb.title('S%i%i'%(m+1,n+1))
+            self.unbiased_error.plot_s_db(m,n,**kwargs)
+            self.biased_error.plot_s_db(m,n,**kwargs)
+            self.total_error.plot_s_db(m,n,**kwargs)
+            plb.ylim(-100,0)
+
     @property
     def error_ntwk(self):
         '''
@@ -609,6 +756,59 @@ class Calibration(object):
             frequency = self.frequency,
             is_reciprocal= self.is_reciprocal)        
     
+    
+    def plot_caled_ntwks(self, attr='s_smith', show_legend=False,**kwargs):
+        '''
+        Plots corrected calibration standards 
+        
+        Given that the calibration is overdetermined, this may be used 
+        as a hueristic verification of calibration quality.
+        
+        Parameters
+        ------------------
+        attr : str
+            Network property to plot, ie 's_db', 's_smith', etc
+        show_legend : bool
+            draw a legend or not
+        \\*\\*kwargs : kwargs
+            passed to the plot method of Network
+        '''
+        ns = NetworkSet(self.caled_ntwks)
+        kwargs.update({'show_legend':show_legend})
+        
+        if ns[0].nports ==1:
+            ns.__getattribute__('plot_'+attr)(0,0, **kwargs)
+        elif ns[0].nports ==2:
+            plb.figure(figsize = (8,8))
+            for k,mn in enumerate([(0, 0), (1, 1), (0, 1), (1, 0)]):
+                plb.subplot(221+k)
+                plb.title('S%i%i'%(mn[0]+1,mn[1]+1))
+                ns.__getattribute__('plot_'+attr)(*mn, **kwargs)
+        else: 
+            raise NotImplementedError
+        plb.tight_layout()
+    
+    def plot_residuals(self, attr='s_db', **kwargs):
+        '''
+        Plot residual networks.
+        
+        Given that the calibration is overdetermined, this may be used 
+        as a metric of the calibration's  *goodness of fit*
+        
+        Parameters
+        ------------------
+        attr : str
+            Network property to plot, ie 's_db', 's_smith', etc
+        \\*\\*kwargs : kwargs
+            passed to the plot method of Network
+            
+        See Also
+        --------
+        Calibration.residual_networks
+        '''
+        
+        NetworkSet(self.caled_ntwks).__getattribute__('plot_'+attr)(**kwargs)
+        
     def write(self, file=None,  *args, **kwargs):
         '''
         Write the Calibration to disk using :func:`~skrf.io.general.write`
@@ -702,20 +902,13 @@ class OnePort(Calibration):
         ideals : list/dict of :class:`~skrf.network.Network` objects
             Predicted ideal response of the calibration standards.
             The order must align with `ideals` list ( or use sloppy_input
-    
-        Returns
-        -----------
-        output : a dictionary
-            output information from the calibration, the keys are
-             * 'error coeffcients': dictionary containing standard error
-               coefficients
-             * 'residuals': a matrix of residuals from the least squared
-               calculation. see numpy.linalg.lstsq() for more info
-    
+        
+        args, kwargs : 
+            passed to func:`Calibration.__init__`
     
         Notes
         -----
-                uses numpy.linalg.lstsq() for least squares calculation
+        This uses numpy.linalg.lstsq() for least squares calculation
         '''
         Calibration.__init__(self, measured, ideals, 
                              *args, **kwargs)
@@ -806,13 +999,14 @@ class SDDL(OnePort):
     '''
     Short Delay Delay Load (Oneport Calibration)
     
-    One-port self-calibration, which contains two delays shorts of 
-    unknown phase.
+    One-port self-calibration, which contains a short, a load, and 
+    two delays shorts of unity magnitude but unknown phase. Originally 
+    designed to be resistant to flange misalignment, see [1]_.
     
     
     References
     -------------
-    .. [#] Z. Liu and R. M. Weikle, "A reflectometer calibration method resistant to waveguide flange misalignment," Microwave Theory and Techniques, IEEE Transactions on, vol. 54, no. 6, pp. 2447-2452, Jun. 2006.
+    .. [1] Z. Liu and R. M. Weikle, "A reflectometer calibration method resistant to waveguide flange misalignment," Microwave Theory and Techniques, IEEE Transactions on, vol. 54, no. 6, pp. 2447-2452, Jun. 2006.
     '''
     family = 'SDDL'
     def __init__(self, measured, ideals, *args, **kwargs):
@@ -827,6 +1021,19 @@ class SDDL(OnePort):
         * delay short2
         * load
         
+        Parameters
+        -----------
+        measured : list/dict  of :class:`~skrf.network.Network` objects
+            Raw measurements of the calibration standards. The order
+            must align with the `ideals` parameter ( or use `sloppy_input`)
+
+        ideals : list/dict of :class:`~skrf.network.Network` objects
+            Predicted ideal response of the calibration standards.
+            The order must align with `ideals` list ( or use sloppy_input
+        
+        args, kwargs : 
+            passed to func:`Calibration.__init__`
+        
         See Also
         ---------
         Calibration.__init__
@@ -835,11 +1042,11 @@ class SDDL(OnePort):
         
         if (len(measured) != 4) or (len(ideals)) != 4:
             raise IndexError('Incorrect number of standards.')
-        Calibration.__init__(self, measured, ideals, *args, **kwargs)
+        Calibration.__init__(self, measured =  measured, 
+                             ideals =ideals, *args, **kwargs)
         
         
     def run(self):
-        
         #meaured reflection coefficients
         w_s = self.measured[0].s.flatten() # short
         w_1 = self.measured[1].s.flatten() # delay short 1
@@ -851,15 +1058,17 @@ class SDDL(OnePort):
         # handle singularities
         G_l[G_l ==0] = ALMOST_ZERO
         
-             
+        
         w_1p  = w_1 - w_s # between (9) and (10)
         w_2p  = w_2 - w_s
         w_lp  = w_l - w_s
         
         
-        alpha = exp(-1j*2*angle(1./w_2p - 1./w_1p)) # (17)
+        ## NOTE: the published equation has an incorrect sign on this argument
+        ## perhaps because they assume arg to measure clockwise angle??
+        alpha = exp(1j*2*angle(1./w_2p - 1./w_1p)) # (17) 
         
-        p = alpha/( 1./w_1p - alpha/w_1p.conj() - (1+G_l)/(G_l*w_lp )) # (22)
+        p = alpha/( 1./w_1p - alpha/w_1p.conj() - (1.+G_l)/(G_l*w_lp )) # (22)
         q = p/(alpha* G_l)   #(23) (put in terms of p)
         
         Bp_re = -1*((1 + (imag(p+q)/real(q-p)) * (imag(q-p)/real(p+q)))/\
@@ -873,16 +1082,89 @@ class SDDL(OnePort):
         A = B - w_s + w_s*C #(6)
             
         # convert the abc vector to standard error coefficients
-        e01e10 = A - B*C
         e00 = B
         e11 = -C
+        e01e10 = A + e00*e11
         
         self._coefs = {\
                 'directivity':e00,\
                 'reflection tracking':e01e10, \
                 'source match':e11\
                 }
+
+class SDDL2(OnePort):
+    '''
+    Short Delay Delay Load (Oneport Calibration)
+    
+    One-port self-calibration, which contains a short, a load, and 
+    two delays shorts of unity magnitude but unknown phase. Originally 
+    designed to be resistant to flange misalignment, see [1]_.
+    
+    
+    References
+    -------------
+    .. [1] Z. Liu and R. M. Weikle, "A reflectometer calibration method resistant to waveguide flange misalignment," Microwave Theory and Techniques, IEEE Transactions on, vol. 54, no. 6, pp. 2447-2452, Jun. 2006.
+    '''
+    family = 'SDDL'
+    def __init__(self, measured, ideals, *args, **kwargs):
+        '''
+        Short Delay Delay Load initializer
         
+
+        measured and ideal networks must be in the order: 
+        
+        * short
+        * delay short1
+        * delay short2
+        * load
+        
+        Parameters
+        -----------
+        measured : list/dict  of :class:`~skrf.network.Network` objects
+            Raw measurements of the calibration standards. The order
+            must align with the `ideals` parameter ( or use `sloppy_input`)
+
+        ideals : list/dict of :class:`~skrf.network.Network` objects
+            Predicted ideal response of the calibration standards.
+            The order must align with `ideals` list ( or use sloppy_input
+        
+        args, kwargs : 
+            passed to func:`Calibration.__init__`
+        
+        See Also
+        ---------
+        Calibration.__init__
+        
+        '''
+        
+        if (len(measured) != 4) or (len(ideals)) != 4:
+            raise IndexError('Incorrect number of standards.')
+        Calibration.__init__(self, measured =  measured, 
+                             ideals =ideals, *args, **kwargs)
+        
+        
+    def run(self):
+        
+        #meaured impedances
+        d = s2z(self.measured[0].s,1) # short
+        a = s2z(self.measured[1].s,1) # delay short 1
+        b = s2z(self.measured[2].s,1) # delay short 2
+        c = s2z(self.measured[3].s,1) # load
+        l = s2z(self.ideals[-1].s,1) # ideal def of load
+        cr_alpha = cross_ratio(b,a,c,d)
+        cr_beta = cross_ratio(a,b,c,d)
+        
+        
+        alpha = imag(cr_alpha)/real(cr_alpha/l)
+        beta = imag(cr_beta)/real(cr_beta/l)
+        
+        
+        self.ideals[1].s = z2s(alpha*1j,1)
+        self.ideals[2].s = z2s(beta*1j,1)
+    
+        OnePort.run(self)
+        
+
 class SOLT(Calibration):
     '''
     Traditional 12-term, full two-port calibration.
@@ -930,8 +1212,9 @@ class SOLT(Calibration):
         '''
         
         self.n_thrus = n_thrus
-        Calibration.__init__(self, measured, ideals,
-                             *args, **kwargs)
+        kwargs.update({'measured':measured,
+                       'ideals':ideals})
+        Calibration.__init__(self, *args, **kwargs)
         
     
       
@@ -1061,6 +1344,107 @@ class SOLT(Calibration):
         
         return measured
         
+class EnhancedResponse(SOLT):
+    '''
+    Enhanced Response Calibration, its like a  One-path SOLT
+    
+    This algorithm is used when you dont have a full two-port system. 
+    It assumes you can measure a1,b1, and b2. Given this data systematic 
+    errors can be partially removed. 
+    
+    Accuracy of correct measurements will rely on having a good match
+    at the passive side of the DUT. 
+    '''
+    family = 'EnhancedResponse'
+    
+    def __init__(self, measured, ideals, n_thrus=1, source_port=1, 
+                 *args, **kwargs):
+        '''
+        EnhancedResponse initializer 
+        
+        The order of the standards must align. The thru standard[s] 
+        must be last in the list. Use the `n_thrus` argument if you 
+        want to use multiple thru standards. Note all 
+        
+        Parameters
+        -------------
+        measured : list/dict  of :class:`~skrf.network.Network` objects
+            Raw measurements of the calibration standards. The order
+            must align with the `ideals` parameter ( or use `sloppy_input`)
+
+        ideals : list/dict of :class:`~skrf.network.Network` objects
+            Predicted ideal response of the calibration standards.
+            The order must align with `ideals` list ( or use sloppy_input
+            
+        n_thrus : int
+            number of thru measurments
+            
+        source_port : [1,2]
+            The port on which the source is active. should be 1 or 2
+            
+        '''
+        
+        
+        
+        self.sp = source_port-1 
+        self.rp = 1 if self.sp == 0 else 0
+        kwargs.update({'measured':measured,
+                       'ideals':ideals,
+                       'n_thrus':n_thrus})
+        SOLT.__init__(self,*args, **kwargs)
+                                              
+                                              
+    def run(self):
+        '''
+        '''
+        if self.sp !=0:
+            raise NotImplementedError('not implemented yet. you can just flip() all you data though. ')
+        n_thrus = self.n_thrus
+        p1_m = [k.s11 for k in self.measured[:-n_thrus]]
+        p1_i = [k.s11 for k in self.ideals[:-n_thrus]]
+        thru = NetworkSet(self.measured[-n_thrus:]).mean_s
+        
+        # create one port calibration for reflective standards  
+        port1_cal = OnePort(measured = p1_m, ideals = p1_i)
+        
+        # cal coefficient pdictionaries
+        p1_coefs = port1_cal.coefs
+        
+        if self.kwargs.get('isolation',None) is not None:
+            raise NotImplementedError()
+            p1_coefs['isolation'] = isolation.s21.s.flatten()
+        else:
+            p1_coefs['isolation'] = npy.zeros(len(thru), dtype=complex)
+        
+        p1_coefs['load match'] = port1_cal.apply_cal(thru.s11).s.flatten()
+        p1_coefs['transmission tracking'] = \
+            (thru.s21.s.flatten() - p1_coefs.get('isolation',0))*\
+            (1. - p1_coefs['source match']*p1_coefs['load match'])
+        
+        coefs = {}
+        coefs.update(dict([('forward %s'%k, p1_coefs[k]) for k in p1_coefs]))
+        
+        # fill all reverse coefficients with zeros or ones
+        zero_coef = npy.zeros(len(thru), dtype=complex)
+        one_coef = npy.ones(len(thru), dtype=complex)
+        coefs.update(dict([('reverse %s'%k, zero_coef) for k in p1_coefs]))
+        coefs.update({'reverse reflection tracking':one_coef})
+        coefs.update({'reverse transmission tracking':one_coef})
+        
+        
+        self._coefs = coefs
+    
+    def apply_cal(self,ntwk):
+        ntwk = ntwk.copy()
+        sp,rp = self.sp,self.rp
+        
+        ntwk.s[:,rp,rp] = 0
+        ntwk.s[:,sp,rp] = 0
+        out = SOLT.apply_cal(self, ntwk)
+        out.s[:,rp,rp] = 0
+        out.s[:,sp,rp] = 0
+        return out
+    
 class EightTerm(Calibration):
     '''
     General EightTerm (aka Error-box) Two-port calibration
@@ -1070,6 +1454,8 @@ class EightTerm(Calibration):
     error coefficients. No self-calibration takes place.  
     The concept is presented in [1]_ , but implementation follows that 
     of  [2]_ .
+    
+    See :func:`__init__`
     
     Notes
     -------
@@ -1093,17 +1479,17 @@ class EightTerm(Calibration):
     def __init__(self, measured, ideals, switch_terms=None,
                  *args, **kwargs):
         '''
-        Initializer
+        EightTerm Initializer
         
         Parameters
         --------------
         measured : list/dict  of :class:`~skrf.network.Network` objects
             Raw measurements of the calibration standards. The order
-            must align with the `ideals` parameter ( or use `sloppy_input`)
+            must align with the `ideals` parameter 
 
         ideals : list/dict of :class:`~skrf.network.Network` objects
             Predicted ideal response of the calibration standards.
-            The order must align with `ideals` list ( or use sloppy_input
+            The order must align with `ideals` list
             
         switch_terms : tuple of :class:`~skrf.network.Network` objects
             the pair of switch terms in the order (forward, reverse)
@@ -1439,7 +1825,6 @@ class TRL(EightTerm):
         thru_m, reflect_m, line_m = self.measured_unterminated 
         self.ideals[2] = determine_line(thru_m, line_m, line_approx) # find line 
         
-
 class UnknownThru(EightTerm):
     '''
     Two-Port Self-Calibration allowing the *thru* standard to be unknown.
@@ -1464,6 +1849,7 @@ class UnknownThru(EightTerm):
         ideal lists. The ideal for the *thru* is only used to choose
         the sign of a square root. Thus, it only has to be have s21, s12
         known within :math:`\pi` phase.
+        
         
         
         Parameters
@@ -1497,6 +1883,123 @@ class UnknownThru(EightTerm):
         # create one port calibration for all reflective standards  
         port1_cal = OnePort(measured = p1_m, ideals = p1_i)
         port2_cal = OnePort(measured = p2_m, ideals = p2_i)
+        
+        # cal coefficient dictionaries
+        p1_coefs = port1_cal.coefs.copy()
+        p2_coefs = port2_cal.coefs.copy()
+        
+        e_rf = port1_cal.coefs_ntwks['reflection tracking']
+        e_rr = port2_cal.coefs_ntwks['reflection tracking']
+        X = port1_cal.error_ntwk
+        Y = port2_cal.error_ntwk
+        
+        # create a fully-determined 8-term cal just get estimate on k's sign
+        # this is really inefficient, i need to work out the math on the 
+        # closed form solution
+        et = EightTerm(
+            measured = self.measured, 
+            ideals = self.ideals,
+            switch_terms= self.switch_terms)
+        k_approx = et.coefs['k'].flatten()
+        
+        # this is equivalent to sqrt(detX*detY/detM)
+        e10e32 = npy.sqrt((e_rf*e_rr*thru_m.s21/thru_m.s12).s.flatten())
+        
+        k_ = e10e32/e_rr.s.flatten()
+        k_ = find_closest(k_, -1*k_, k_approx)
+        
+        #import pylab as plb
+        #plot(abs(k_-k_approx))
+        #plb.show()
+        # create single dictionary for all error terms
+        coefs = {}
+        
+        coefs.update(dict([('forward %s'%k, p1_coefs[k]) for k in p1_coefs]))
+        coefs.update(dict([('reverse %s'%k, p2_coefs[k]) for k in p2_coefs]))
+        
+        if self.switch_terms is not None:
+            coefs.update({
+                'forward switch term': self.switch_terms[0].s.flatten(),
+                'reverse switch term': self.switch_terms[1].s.flatten(),
+                })
+        else:
+            warn('No switch terms provided')
+            coefs.update({
+                'forward switch term': npy.zeros(len(self.frequency), dtype=complex),
+                'reverse switch term': npy.zeros(len(self.frequency), dtype=complex),
+                })
+        
+        coefs.update({'k':k_})
+        
+        self.coefs = coefs
+
+class MRC(UnknownThru):
+    '''
+    Misalignment Resistance Calibration
+    
+    This is an error-box based calibration that is a  combination of the 
+    SDDL[1]_ and the UnknownThru[2]_, algorithms. 
+    The self-calibration aspects of these two algorithms alleviate the
+    need to know the phase of the delay shorts, as well as the exact
+    response of the thru. Thus the calibration is resistant to 
+    waveguide flangemisalignment.
+    
+    
+    References
+    -----------
+    .. [1] Z. Liu and R. M. Weikle, "A reflectometer calibration method resistant to waveguide flange misalignment," Microwave Theory and Techniques, IEEE Transactions on, vol. 54, no. 6, pp. 2447-2452, Jun. 2006.
+    
+    .. [2] A. Ferrero and U. Pisani, "Two-port network analyzer calibration using an unknown `thru,`" IEEE Microwave and Guided Wave Letters, vol. 2, no. 12, pp. 505-507, 1992.
+    
+    
+    '''
+    family = 'MRC'
+    def __init__(self, measured, ideals,  *args, **kwargs):
+        '''
+        Initializer
+        
+        This calibration takes exactly 5 standards, which must be in the
+        order:  
+            
+            [Short, DelayShort1, DelayShort1, Load, Thru]
+            
+        The ideals for the delay shorts are not used and the ideal for 
+        the *thru* is only used to choose
+        the sign of a square root. Thus, it only has to be have s21, s12
+        known within :math:`\pi` phase.
+        
+        
+        Parameters
+        --------------
+        measured : list/dict  of :class:`~skrf.network.Network` objects
+            Raw measurements of the calibration standards. The order
+            must align with the `ideals` parameter 
+
+        ideals : list/dict of :class:`~skrf.network.Network` objects
+            Predicted ideal response of the calibration standards.
+            The order must align with `ideals` list
+        
+        switch_terms : tuple of :class:`~skrf.network.Network` objects
+            the pair of switch terms in the order (forward, reverse)
+        '''
+        
+        UnknownThru.__init__(self, measured = measured, ideals = ideals,
+                           *args, **kwargs)
+        
+
+    def run(self):
+        p1_m = [k.s11 for k in self.measured_unterminated[:-1]]
+        p2_m = [k.s22 for k in self.measured_unterminated[:-1]]
+        p1_i = [k.s11 for k in self.ideals[:-1]]
+        p2_i = [k.s22 for k in self.ideals[:-1]]
+        
+        thru_m = self.measured_unterminated[-1]
+        
+        thru_approx  =  self.ideals[-1]
+        
+        # create one port calibration for all reflective standards  
+        port1_cal = SDDL(measured = p1_m, ideals = p1_i)
+        port2_cal = SDDL(measured = p2_m, ideals = p2_i)
         
         # cal coefficient dictionaries
         p1_coefs = port1_cal.coefs.copy()
